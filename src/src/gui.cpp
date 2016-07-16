@@ -1,0 +1,275 @@
+#if defined(GUI_SUPPORT) && GUI_SUPPORT == 1
+#include <cstddef>
+#include <cstdlib>
+#include <iostream>
+#include <string>
+#include <map>
+
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+
+#include "gui.hpp"
+#include "misc.hpp"
+
+
+wxBEGIN_EVENT_TABLE(MainFrame, wxFrame)
+    EVT_CLOSE(MainFrame::OnClose)
+    EVT_COMMAND(wxID_ANY, wxEVT_COMMAND_PATCHING_COMPLETED, MainFrame::OnPatchingCompletion)
+wxEND_EVENT_TABLE()
+
+wxDEFINE_EVENT(wxEVT_COMMAND_PATCHING_COMPLETED, wxCommandEvent);
+
+
+namespace fs = boost::filesystem;
+
+
+
+PatchingThread::PatchingThread(MainFrame * const handler, const std::map<std::string, std::string> & queue, const Options & opts) : wxThread(wxTHREAD_DETACHED) {
+	this->queue = queue;
+	this->options = opts;
+	this->handler = handler;
+}
+
+
+void * PatchingThread::Entry(void) {
+	for (auto it = this->queue.begin(); it != this->queue.end(); it++) {
+		std::string input = it->first;
+		std::string output = it->second;
+
+		std::cout << "Patching " << input << " -> " << output << std::endl;
+
+		if (process_rom(input, output, this->options)) {
+			std::cout << "Success: " << input << " -> " << output << std::endl;
+		} else {
+			std::cerr << "Failed: " << input << " -> " << output << std::endl;
+		}
+	}
+
+	std::cout << "Finished iterating over " << queue.size() << " ROM(s)." << std::endl;
+
+	// HACK Assuming this->handler pointer is safe.
+	assert(this->handler != NULL && "PatchingThread->handler is NULL.");
+	wxQueueEvent(this->handler, new wxCommandEvent(wxEVT_COMMAND_PATCHING_COMPLETED));
+
+	return 0;
+}
+
+
+// MainFrame
+
+MainFrame::MainFrame(wxWindow * parent, wxWindowID id, const wxString& title,
+						   const wxPoint& pos, const wxSize& size, long style)
+		: MainFrameBase(parent, id, title, pos, size, style) {
+	this->UpdateOptions();
+	
+	// TODO Set window icon for non-Windows platforms.
+	#ifdef _WIN32
+		this->SetIcon(wxICON(IDI_ICON1));
+	#endif
+}
+
+
+Options MainFrame::ToOptions() {
+	Options opts;
+
+	opts.ips = this->ips_filepicker->GetPath();
+	opts.patch_sram = this->sram_cbx->GetValue();
+	opts.uniformize = this->uniformize_cbx->GetValue();
+	opts.patch_ez4 = this->ez4_cbx->GetValue();
+	opts.patch_complement = this->complement_check_cbx->GetValue();
+	opts.trim = this->trim_cbx->GetValue();
+	opts.in_place = this->modify_in_place_cbx->GetValue();
+	opts.dummy_save = this->dummy_save_cbx->GetValue();
+
+	return opts;
+}
+
+
+void MainFrame::UpdateOptions() {
+	if (this->patching_thread != NULL) {
+		this->ips_cbx->Disable();
+		this->ips_filepicker->Disable();
+		this->patch_btn->Disable();
+
+		this->sram_cbx->Disable();
+		this->ez4_cbx->Disable();
+		this->trim_cbx->Disable();
+		this->uniformize_cbx->Disable();
+		this->complement_check_cbx->Disable();
+		this->dummy_save_cbx->Disable();
+		this->modify_in_place_cbx->Disable();
+		this->input_filepicker_btn->Disable();
+		this->clear_input_btn->Disable();
+		this->input_file_list->Disable();
+		this->input_lbl->Disable();
+	} else {
+		this->ips_cbx->Enable();
+		this->ips_filepicker->Enable();
+		this->patch_btn->Enable();
+
+		this->sram_cbx->Enable();
+		this->ez4_cbx->Enable();
+		this->trim_cbx->Enable();
+		this->uniformize_cbx->Enable();
+		this->complement_check_cbx->Enable();
+		this->dummy_save_cbx->Enable();
+		this->modify_in_place_cbx->Enable();
+		this->input_filepicker_btn->Enable();
+		this->clear_input_btn->Enable();
+		this->input_file_list->Enable();
+		this->input_lbl->Enable();
+
+		this->ips_cbx->Enable(this->input_file_list->GetCount() <= 1);
+		this->ips_cbx->SetValue(this->input_file_list->GetCount() <= 1 ? this->ips_cbx->GetValue() : false);
+
+		if (!this->ips_cbx->IsChecked() || this->input_file_list->GetCount() > 1) {
+			this->ips_filepicker->SetPath("");
+			this->ips_filepicker->Disable();
+		}
+
+		if (this->input_file_list->GetCount() <= 0) {
+			this->patch_btn->Disable();
+		}
+	}
+}
+
+
+void MainFrame::OnClose(wxCloseEvent &) {
+	std::cout << "MainFrame::OnClose()" << std::endl;
+	this->Destroy();
+}
+
+
+void MainFrame::OnInputFileBtnClicked( wxCommandEvent& event ) {
+	wxFileDialog open_file_dialog(this, _("Select GBA ROM file(s)"), "", "", "GBA ROM Files (*.gba, *.agb)|*.gba;*.agb|ROM Files (*.rom)|*.rom|Binary Files (*.bin)|*.bin|All files (*.*)|*.*", wxFD_OPEN | wxFD_FILE_MUST_EXIST | wxFD_MULTIPLE);
+	wxArrayString files;
+
+	if (open_file_dialog.ShowModal() == wxID_CANCEL) {
+		this->input_file_list->Clear();
+		return;
+	}
+
+	open_file_dialog.GetPaths(files);
+	this->input_file_list->Set(files);
+	this->UpdateOptions();
+
+	size_t num_files = files.GetCount();
+	for (size_t i=0; i<num_files; i++) {
+		wxString filepath = files.Item(i);
+		std::cout << "Selected input ROM file: " << filepath << std::endl;
+	}
+}
+
+
+void MainFrame::OnClearInputBtnClicked( wxCommandEvent& event ) {
+	std::cout << "Input ROM file(s) cleared." << std::endl;
+	this->input_file_list->Clear();
+	this->UpdateOptions();
+}
+
+
+void MainFrame::OnPatchBtnClicked( wxCommandEvent& event ) {
+	// Determine default directory.
+	wxString default_dir = "";
+	std::map<std::string, std::string> queue;
+
+	if (this->input_file_list->GetCount() <= 0) {
+		// For safety.
+		std::cerr << "Patch button clicked, but no input file(s) specified." << std::endl;
+	} else {
+		if (this->modify_in_place_cbx->GetValue()) {
+			wxArrayString input_files = this->input_file_list->GetStrings();
+			size_t num_input_files = input_files.GetCount();
+
+			for (size_t i=0; i<num_input_files; i++) {
+				std::string input_file = std::string(input_files.Item(i).mb_str());
+				queue[input_file] = input_file;
+			}
+		} else {
+			if (this->input_file_list->GetCount() == 1) {
+				wxFileDialog write_dialog(this, _("Specify write path"), "", default_dir, "GBA ROM Files (*.gba, *.agb)|*.gba;*.agb|ROM Files (*.rom)|*.rom|Binary Files (*.bin)|*.bin|All files (*.*)|*.*", wxFD_SAVE);
+
+				if (write_dialog.ShowModal() != wxID_CANCEL) {
+					std::cout << "Patch file write to " << write_dialog.GetPath() << std::endl;
+
+					std::string input_file = std::string(this->input_file_list->GetString(0).mb_str());
+					std::string output_file = std::string(write_dialog.GetPath().mb_str());
+
+					queue[input_file] = output_file;
+				} else {
+					std::cout << "Patch cancelled." << std::endl;
+				}
+			} else {
+				wxDirDialog write_dialog(this, _("Specify write directory"), default_dir);
+
+				if (write_dialog.ShowModal() != wxID_CANCEL) {
+					std::cout << "Patch files write to " << write_dialog.GetPath() << std::endl;
+
+					std::string output_dir = std::string(write_dialog.GetPath());
+
+					wxArrayString input_files = this->input_file_list->GetStrings();
+					size_t num_input_files = input_files.GetCount();
+
+					for (size_t i=0; i<num_input_files; i++) {
+						std::string input_file = std::string(input_files.Item(i).mb_str());
+						fs::path _output_file = fs::path(output_dir) / fs::path(input_file).filename();
+						std::string output_file = _output_file.string();
+
+						queue[input_file] = output_file;
+					}
+
+					std::cout << "Patching queue size: " << queue.size() << std::endl;
+				} else {
+					std::cout << "Patching of " << this->input_file_list->GetCount() << " files cancelled." << std::endl;
+				}
+			}
+		}
+	}
+
+
+	if (queue.size() > 0) {
+		Options opts = this->ToOptions();
+		this->UpdateOptions();
+
+		if (this->patching_thread == NULL) {
+			this->patching_thread = new PatchingThread(this, queue, opts);
+			this->patching_thread->Create();
+			this->patching_thread->Run();
+		} else {
+			std::cerr << "There's already a patching thread. Ignoring request to start patching." << std::endl;
+		}
+	}
+
+
+	this->UpdateOptions();
+}
+
+
+void MainFrame::OnPatchingCompletion(wxCommandEvent & WXUNUSED(event)) {
+	std::cout << "MainFrame::OnPatchingCompletion()" << std::endl;
+	this->patching_thread = NULL;
+	this->UpdateOptions();
+}
+
+
+bool App::OnInit() {
+	std::cout << "Initialize GUI." << std::endl;
+
+	// FIXME Can't access PROJECT_NAME variable to set window title.
+	wxFrame * frame = new MainFrame(NULL, wxID_ANY, wxT("ezgba v0.2.0"));
+
+	this->SetExitOnFrameDelete(true);
+	frame->Show(true);
+
+	return true;
+}
+
+
+int App::OnExit() {
+	std::cout << "Exit GUI." << std::endl;
+	return EXIT_SUCCESS;
+}
+
+
+
+#endif //GUI_SUPPORT

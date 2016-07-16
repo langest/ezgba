@@ -1,0 +1,218 @@
+#include <cstddef>
+#include <cstdlib>
+#include <string>
+#include <iostream>
+#include <utility>
+
+#include <boost/filesystem/convenience.hpp>
+#include <tclap/CmdLine.h>
+
+#if defined(GUI_SUPPORT) && GUI_SUPPORT == 1
+	#include <wx/wxprec.h>
+
+	#ifndef WX_PRECOMP
+		#include <wx/wx.h>
+	#endif
+#endif
+
+#ifdef _WIN32
+	#include <windows.h>
+#else
+	#include <unistd.h>
+#endif
+
+
+#include "patch.hpp"
+#include "misc.hpp"
+
+#if defined(GUI_SUPPORT) && GUI_SUPPORT == 1
+	#include "gui.hpp"
+#endif
+
+
+static const char * PROJECT_NAME = "ezgba";
+static const char * PROJECT_VERSION = "0.2.0";
+
+
+class BetterCmdLineOutput : public TCLAP::StdOutput {
+public:
+	void failure(TCLAP::CmdLineInterface & c, TCLAP::ArgException & e) {
+		std::cerr << "Error: " << e.what() << std::endl;
+		std::exit(EXIT_FAILURE);
+	}
+
+	void usage(TCLAP::CmdLineInterface & c) {
+		std::list<TCLAP::Arg *> args = c.getArgList();
+		unsigned int whitespace_padding = 0;
+
+		std::cout << PROJECT_NAME << " " << c.getVersion() << std::endl;
+		std::cout << c.getMessage() << std::endl;
+		std::cout << std::endl;
+
+		std::cout << "Usage: " << boost::filesystem::basename(c.getProgramName());
+
+		for (TCLAP::ArgListIterator it = args.begin(); it != args.end(); it++) {
+			if ((*it)->isRequired()) {
+				std::string flag = (*it)->getFlag();
+				std::string name = (*it)->getName();
+
+				// TODO Print argument name in uppercase.
+				std::cout << " " << (flag.size() > 0 ? "-" + flag : "--" + name);
+				std::cout << " [" << (name.size() > 0 ? name : flag) << "]";
+			}
+		}
+
+		std::cout << " -i INPUT -o|--in-place [OUTPUT] [OPTIONS]" << std::endl;
+		std::cout << std::endl;
+
+		std::cout << "Options:" << std::endl;
+
+		std::vector<std::pair<std::string, std::string>> options_print;
+
+		for (TCLAP::ArgListIterator it = args.begin(); it != args.end(); it++) {
+			std::string s = "  ";
+
+			if ((*it)->getFlag().size() > 0 && (*it)->getName().size() > 0) {
+				s += "-";
+				s += (*it)->getFlag();
+				s += ", --";
+				s += (*it)->getName();
+			} else if ((*it)->getFlag().size() > 0) {
+				s += "-";
+				s += (*it)->getFlag();
+			} else if ((*it)->getName().size() > 0) {
+				s += "    --";
+				s += (*it)->getName();
+			}
+
+			if ((*it)->isValueRequired()) {
+				// HACK TCLAP can't retrieve the argument type; must parse from long ID.
+				bool print = false;
+
+				s += " ";
+
+				for (char & c : (*it)->longID()) {
+					if (c == '<') {
+						print = true;
+					}
+
+					if (print) {
+						s += c;
+					}
+
+					if (c == '>') {
+						print = false;
+						break;
+					}
+				}
+			}
+
+			while (s.size() < whitespace_padding) {
+				s += " ";
+			}
+
+			options_print.push_back(std::pair<std::string, std::string>(s.c_str(), (*it)->getDescription()));
+		}
+
+		for (std::pair<std::string, std::string> o : options_print) {
+			whitespace_padding = (std::max)((unsigned int) o.first.size(), whitespace_padding);
+		}
+
+		for (std::pair<std::string, std::string> o : options_print) {
+			std::cout << o.first;
+
+			for (size_t i=o.first.size(); i < whitespace_padding; i++) {
+				std::cout << " ";
+			}
+
+			std::cout << " " << o.second << std::endl;
+		}
+	}
+
+	void version(TCLAP::CmdLineInterface & c) {
+		std::cout << PROJECT_NAME << " v" << PROJECT_VERSION << std::endl;
+	}
+};
+
+
+Options parse_command_line_arguments(const int argc, const char ** argv, std::string & input_file, std::string & output_file) {
+	Options opts;
+
+	try {
+		TCLAP::CmdLine cmd(
+				"A GBA ROM patcher. Supports EZ Flash 4.\n"
+						"This program was created by foobar_@gbatemp.",
+				' ', PROJECT_VERSION);
+		BetterCmdLineOutput cmd_output;
+
+		TCLAP::ValueArg<std::string> input_arg("i", "input", "Input *.gba file; no compressed formats.", false, "", "path");
+		TCLAP::ValueArg<std::string> output_arg("o", "output", "Output file path.", false, "", "path");
+		TCLAP::ValueArg<std::string> ips_arg("", "ips", "IPS patch file.", false, "", "path");
+
+		TCLAP::SwitchArg sram_arg("", "no-sram", "Patch ROM save type to SRAM.", true);
+		TCLAP::SwitchArg uniformize_arg("u", "uniformize", "Make ROM padding same-valued.", false);
+		TCLAP::SwitchArg ez4_patch_arg("", "no-ez4", "Apply special EZ Flash 4 header patch.", true);
+		TCLAP::SwitchArg complement_arg("", "no-checksum", "Correct complement checksum.", true);
+		TCLAP::SwitchArg trim_arg("t", "trim", "Trim ROM padding.", false);
+		TCLAP::SwitchArg dummy_save_arg("", "dummy-save", "Create dummy save file(s) in \"saver\" directory.", false);
+		TCLAP::SwitchArg in_place_arg("", "in-place", "Overwrite the existing file instead of creating a new one.", false);
+
+		cmd.setOutput(&cmd_output);
+
+		cmd.add(input_arg);
+		cmd.add(output_arg);
+		cmd.add(in_place_arg);
+		cmd.add(ips_arg);
+		cmd.add(sram_arg);
+		cmd.add(uniformize_arg);
+		cmd.add(ez4_patch_arg);
+		cmd.add(complement_arg);
+		cmd.add(trim_arg);
+		cmd.add(dummy_save_arg);
+		cmd.parse(argc, argv);
+
+		// TODO Sanitize file paths.
+		opts.ips = ips_arg.getValue();
+		opts.patch_sram = sram_arg.getValue();
+		opts.uniformize = uniformize_arg.getValue();
+		opts.patch_ez4 = ez4_patch_arg.getValue();
+		opts.patch_complement = complement_arg.getValue();
+		opts.trim = trim_arg.getValue();
+		opts.in_place = in_place_arg.getValue();
+		opts.dummy_save = dummy_save_arg.getValue();
+
+		input_file = input_arg.getValue();
+		output_file = output_arg.getValue();
+	} catch (TCLAP::ArgException &e) {
+		std::cerr << "Error: " << e.error() << " for argument \"" << e.argId() << "\"" << std::endl;
+	}
+
+	return opts;
+}
+
+
+// TODO Support --dummy-save argument.
+
+#if defined(GUI_SUPPORT) && GUI_SUPPORT == 1
+	IMPLEMENT_APP(App)
+#else
+	int main(const int argc, const char ** argv) {
+		std::string input_file;
+		std::string output_file;
+		Options opts = parse_command_line_arguments(argc, argv, input_file, output_file);
+
+		if (input_file.size() <= 0) {
+			std::cerr << "Input file not specified." << std::endl;
+			return EXIT_FAILURE;
+		} else if (output_file.size() <= 0 && !opts.in_place) {
+			std::cerr << "Output file not specified." << std::endl;
+			return EXIT_FAILURE;
+		}
+
+		if (process_rom(input_file, output_file, opts)) {
+			return EXIT_SUCCESS;
+		};
+
+		return EXIT_FAILURE;
+	}
+#endif
