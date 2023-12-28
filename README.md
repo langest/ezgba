@@ -8,6 +8,36 @@ no longer necessary. *No longer necessary.* **Smell the freedom.**
 There's no official website for this app. The only place you should be getting
 this file from is from my thread at gbatemp.
 
+![Ezgba-GUI](./screenshots/screenshot_01.jpg)
+
+Usage
+-----
+
+Run the command:
+
+```
+./ezgba-cli --help
+ezgba 0.2.0
+A GBA ROM patcher. Supports EZ Flash 4.
+This program was created by foobar_@gbatemp.
+
+Usage: ezgba-cli -i INPUT -o|--in-place [OUTPUT] [OPTIONS]
+
+Options:
+      --dummy-save    Create dummy save file(s) in "saver" directory.
+  -t, --trim          Trim ROM padding.
+      --no-checksum   Correct complement checksum.
+      --no-ez4        Apply special EZ Flash 4 header patch.
+  -u, --uniformize    Make ROM padding same-valued.
+      --no-sram       Patch ROM save type to SRAM.
+      --ips <path>    IPS patch file.
+      --in-place      Overwrite the existing file instead of creating a new one.
+  -o, --output <path> Output file path.
+  -i, --input <path>  Input *.gba file; no compressed formats.
+  --, --ignore_rest   Ignores the rest of the labeled arguments following this flag.
+      --version       Displays version information and exits.
+  -h, --help          Displays usage information and exits.
+```
 
 License
 -------
@@ -19,6 +49,25 @@ Compiling
 Windows, Mac OS X, and Linux are all supported. Everything is written in C++.
 CMake, Boost, and wxWidgets (if building GUI) are required to compile. Supports
 GCC v5+ as far as compilers go.
+
+#### Prerequisites
+[Boost libraries C++](https://www.boost.org/)
+
+Optionally
+[wxWidgets](https://www.wxwidgets.org/)
+
+#### Building for command line
+```console
+foo@bar:~$ mkdir build && cd build
+foo@bar:~$ cmake ../src/
+foo@bar:~$ make
+```
+#### Build for command line & GUI
+```console
+foo@bar:~$ mkdir build && cd build
+foo@bar:~$ cmake -Dezgba_GUI_SUPPORT=True ../src/
+foo@bar:~$ make
+```
 
 
 SRAM Patches
